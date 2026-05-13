@@ -5,16 +5,26 @@ import bcrypt
 import jwt
 import datetime
 import os
+from openai import OpenAI, APIError, AuthenticationError
 from functools import wraps
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 app = Flask(__name__)
 CORS(app)
 
 JWT_SECRET = os.getenv('JWT_SECRET', 'recarga_inteligente_jwt_secret_2024')
 JWT_ALGORITHM = 'HS256'
+
+key = os.getenv('OPENAI_API_KEY')
+if not key:
+    print("⚠️ AVISO: OPENAI_API_KEY não encontrada no .env")
+else:
+    # Mostra apenas o início e fim da chave para confirmar que foi carregada
+    print(f"✅ OpenAI API Key carregada: {key[:5]}...{key[-4:] if len(key) > 4 else ''}")
+
+client = OpenAI(api_key=key)
 
 DB_CONFIG = {
     'host': os.getenv('DB_HOST', 'localhost'),
@@ -405,131 +415,92 @@ def get_recharges(uid):
 @token_required
 def ai_chat(uid):
     data = request.json or {}
-    msg = data.get('message', '').lower().strip()
+    user_msg = data.get('message', '').strip()
+
+    if not user_msg:
+        return jsonify({'error': 'Mensagem vazia'}), 400
 
     conn = get_db()
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute('SELECT nome, credito, plano, potencia_max FROM usuarios WHERE id = %s', (uid,))
+        # 1. Buscar Dados do Usuário
+        cursor.execute('SELECT nome, email, credito, plano, potencia_max, data_cadastro FROM usuarios WHERE id = %s', (uid,))
         user = cursor.fetchone()
-        first_name = user['nome'].split()[0]
-        response = None
+        
+        # 2. Buscar Estatísticas Gerais
+        cursor.execute('SELECT COALESCE(SUM(custo),0) as gasto_total, COALESCE(SUM(energia_kwh),0) as energia_total, COUNT(*) as qtd_recargas FROM recargas WHERE usuario_id=%s', (uid,))
+        stats = cursor.fetchone()
 
-        # Intenção: gasto total
-        if any(w in msg for w in ['gastei', 'gasto total', 'quanto eu gastei', 'total em recargas']):
-            cursor.execute('SELECT COALESCE(SUM(custo),0) as total FROM recargas WHERE usuario_id=%s', (uid,))
-            total = float(cursor.fetchone()['total'])
-            response = f"💰 Você gastou um total de **R$ {total:.2f}** em recargas, {first_name}!"
+        # 3. Buscar Últimas Recargas
+        cursor.execute('SELECT local, regiao, vaga, energia_kwh, custo, potencia_real, data_hora FROM recargas WHERE usuario_id=%s ORDER BY data_hora DESC LIMIT 5', (uid,))
+        history = cursor.fetchall()
+        for r in history:
+            r['data_hora'] = r['data_hora'].strftime('%d/%m/%Y %H:%M')
 
-        # Intenção: número de recargas
-        elif any(w in msg for w in ['quantas recargas', 'quantas vezes', 'numero de recargas', 'vezes que carreguei', 'sessões']):
-            cursor.execute('SELECT COUNT(*) as total FROM recargas WHERE usuario_id=%s', (uid,))
-            total = cursor.fetchone()['total']
-            response = f"⚡ Você realizou **{total} recarga(s)** até agora, {first_name}!"
+        # 4. Buscar Últimas Reservas
+        cursor.execute('SELECT local, vaga, tempo_min, valor, status, data_hora FROM reservas WHERE usuario_id=%s ORDER BY data_hora DESC LIMIT 3', (uid,))
+        reservations = cursor.fetchall()
+        for res in reservations:
+            res['data_hora'] = res['data_hora'].strftime('%d/%m/%Y %H:%M')
 
-        # Intenção: saldo
-        elif any(w in msg for w in ['saldo', 'crédito', 'credito', 'quanto tenho', 'meu saldo', 'meu crédito']):
-            response = f"💳 Seu saldo atual é **R$ {float(user['credito']):.2f}**, {first_name}!"
+        # Construção do Contexto (Prompt System)
+        system_context = f"""
+Você é o assistente virtual do "Sistema de Recarga Inteligente de VEs". 
+Seu objetivo é ajudar o usuário com dúvidas sobre o sistema, seus gastos, histórico e informações sobre recarga de veículos elétricos.
 
-        # Intenção: plano
-        elif any(w in msg for w in ['plano', 'meu plano', 'qual plano']):
-            plano = user['plano'] or 'Nenhum plano ativo'
-            pot = f"{float(user['potencia_max']):.0f} kW" if user['potencia_max'] else '—'
-            response = f"📋 Seu plano atual é **{plano}** (até {pot}), {first_name}!"
+DIRETRIZES DE RESPOSTA:
+1. Seja educado, profissional e use o nome do usuário.
+2. Use APENAS os dados fornecidos abaixo para responder sobre a conta do usuário. 
+3. Se o usuário perguntar algo que não está nos dados (ex: "quem ganhou o jogo ontem?"), responda educadamente que você só tem acesso a informações do sistema de recargas.
+4. Use Markdown para formatar a resposta (negrito, listas, etc.).
+5. O escopo do site é a gestão de recargas de veículos elétricos na cidade de São Paulo.
 
-        # Intenção: histórico
-        elif any(w in msg for w in ['histórico', 'historico', 'últimas recargas', 'ultimas recargas', 'minhas recargas']):
-            cursor.execute(
-                'SELECT local, regiao, energia_kwh, custo, data_hora FROM recargas WHERE usuario_id=%s ORDER BY data_hora DESC LIMIT 5',
-                (uid,)
-            )
-            rows = cursor.fetchall()
-            if not rows:
-                response = f"📊 Você ainda não realizou nenhuma recarga, {first_name}."
-            else:
-                linhas = [f"📊 Suas últimas {len(rows)} recarga(s), {first_name}:\n"]
-                for r in rows:
-                    d = r['data_hora'].strftime('%d/%m/%Y %H:%M')
-                    linhas.append(f"• {d} — {r['local']} ({r['regiao']}) — {float(r['energia_kwh']):.2f} kWh — R$ {float(r['custo']):.2f}")
-                response = '\n'.join(linhas)
+DADOS DO USUÁRIO ATUAL ({user['nome']}):
+- Saldo Atual: R$ {float(user['credito']):.2f}
+- Plano: {user['plano'] or 'Nenhum'}
+- Potência Máxima do Plano: {float(user['potencia_max']) if user['potencia_max'] else '7'} kW
+- Data de Cadastro: {user['data_cadastro'].strftime('%d/%m/%Y')}
+- Total Gasto em Recargas: R$ {float(stats['gasto_total']):.2f}
+- Energia Total Consumida: {float(stats['energia_total']):.2f} kWh
+- Total de Sessões de Recarga: {stats['qtd_recargas']}
 
-        # Intenção: última recarga
-        elif any(w in msg for w in ['última recarga', 'ultima recarga', 'última vez', 'ultima vez']):
-            cursor.execute(
-                'SELECT local, regiao, vaga, energia_kwh, custo, potencia_real, data_hora FROM recargas WHERE usuario_id=%s ORDER BY data_hora DESC LIMIT 1',
-                (uid,)
-            )
-            r = cursor.fetchone()
-            if not r:
-                response = f"Você ainda não realizou nenhuma recarga, {first_name}."
-            else:
-                d = r['data_hora'].strftime('%d/%m/%Y %H:%M')
-                response = (f"⚡ Última recarga em **{d}**:\n"
-                            f"• Local: {r['local']} ({r['regiao']})\n"
-                            f"• Vaga: {r['vaga']}\n"
-                            f"• Energia: {float(r['energia_kwh']):.2f} kWh\n"
-                            f"• Potência: {float(r['potencia_real']):.2f} kW\n"
-                            f"• Custo: R$ {float(r['custo']):.2f}")
+HISTÓRICO RECENTE DE RECARGAS:
+{history if history else 'Nenhuma recarga realizada ainda.'}
 
-        # Intenção: energia total carregada
-        elif any(w in msg for w in ['energia total', 'total de energia', 'kwh total', 'total kwh', 'energia carregada']):
-            cursor.execute('SELECT COALESCE(SUM(energia_kwh),0) as total FROM recargas WHERE usuario_id=%s', (uid,))
-            total = float(cursor.fetchone()['total'])
-            response = f"⚡ Você carregou um total de **{total:.2f} kWh**, {first_name}!"
+RESERVAS RECENTES:
+{reservations if reservations else 'Nenhuma reserva realizada ainda.'}
 
-        # Intenção: reservas
-        elif any(w in msg for w in ['reserva', 'reservas', 'minhas reservas']):
-            cursor.execute(
-                'SELECT local, regiao, vaga, tempo_min, valor, status, data_hora FROM reservas WHERE usuario_id=%s ORDER BY data_hora DESC LIMIT 5',
-                (uid,)
-            )
-            rows = cursor.fetchall()
-            if not rows:
-                response = f"📅 Você ainda não realizou nenhuma reserva, {first_name}."
-            else:
-                linhas = [f"📅 Suas últimas reservas, {first_name}:\n"]
-                for r in rows:
-                    d = r['data_hora'].strftime('%d/%m/%Y %H:%M')
-                    linhas.append(f"• {d} — {r['local']} — Vaga {r['vaga']} — R$ {float(r['valor']):.2f} ({r['status']})")
-                response = '\n'.join(linhas)
+INFORMAÇÕES DO SISTEMA:
+- Locais de recarga disponíveis em: Zona Sul, Leste, Oeste e Norte de SP.
+- Preço fixo por kWh: R$ 1,80.
+- Custo de reserva de vaga: R$ 0,50 por minuto.
+"""
 
-        # Intenção: resumo / relatório
-        elif any(w in msg for w in ['resumo', 'relatório', 'relatorio', 'meu resumo', 'dashboard']):
-            cursor.execute('SELECT COALESCE(SUM(custo),0) as gasto, COALESCE(SUM(energia_kwh),0) as energia, COUNT(*) as qtd FROM recargas WHERE usuario_id=%s', (uid,))
-            stats = cursor.fetchone()
-            response = (f"📊 Resumo da sua conta, {first_name}:\n"
-                        f"• Plano: {user['plano'] or 'Nenhum'}\n"
-                        f"• Saldo atual: R$ {float(user['credito']):.2f}\n"
-                        f"• Total de recargas: {stats['qtd']}\n"
-                        f"• Energia total: {float(stats['energia']):.2f} kWh\n"
-                        f"• Gasto total: R$ {float(stats['gasto']):.2f}")
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_context},
+                {"role": "user", "content": user_msg}
+            ],
+            temperature=0.7,
+            max_tokens=500
+        )
 
-        # Intenção: saudação
-        elif any(w in msg for w in ['olá', 'ola', 'oi', 'hello', 'hey', 'bom dia', 'boa tarde', 'boa noite', 'tudo bem']):
-            response = (f"👋 Olá, {first_name}! Sou o assistente do Sistema de Recarga Inteligente.\n"
-                        f"Posso te ajudar com informações sobre seus gastos, recargas, saldo e histórico.\n"
-                        f"Digite **ajuda** para ver o que posso responder!")
+        ai_response = response.choices[0].message.content
+        return jsonify({'response': ai_response})
 
-        # Intenção: ajuda
-        elif any(w in msg for w in ['ajuda', 'help', 'comandos', 'o que você sabe', 'o que voce sabe']):
-            response = (f"🤖 Aqui está o que posso responder, {first_name}:\n\n"
-                        f"• *Quanto eu já gastei?* — Gasto total em recargas\n"
-                        f"• *Quantas recargas fiz?* — Número de sessões\n"
-                        f"• *Qual meu saldo?* — Crédito disponível\n"
-                        f"• *Qual meu plano?* — Plano e potência\n"
-                        f"• *Histórico de recargas* — Últimas 5 recargas\n"
-                        f"• *Última recarga* — Detalhes da última sessão\n"
-                        f"• *Energia total carregada* — kWh acumulados\n"
-                        f"• *Minhas reservas* — Histórico de reservas\n"
-                        f"• *Resumo* — Relatório geral da conta")
-
-        # Intenção não reconhecida
-        else:
-            response = (f"🤔 Não entendi sua pergunta, {first_name}. "
-                        f"Só consigo responder com dados reais da sua conta.\n"
-                        f"Digite **ajuda** para ver o que posso responder!")
-
-        return jsonify({'response': response})
+    except AuthenticationError:
+        msg = "⚠️ **Erro de Configuração:** A chave da API OpenAI não foi encontrada ou é inválida. Por favor, adicione uma chave válida no arquivo `.env` para usar o assistente."
+        print(msg)
+        return jsonify({'response': msg})
+    except APIError as e:
+        msg = f"🔌 **Erro na API:** Tive um problema de conexão com a OpenAI. Detalhes: {e}"
+        print(msg)
+        return jsonify({'response': msg})
+    except Exception as e:
+        msg = "🤯 **Erro Inesperado:** Desculpe, tive um problema interno ao processar sua pergunta."
+        print(f"{msg} {e}")
+        return jsonify({'response': msg})
     finally:
         cursor.close()
         conn.close()
