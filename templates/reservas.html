@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>EV Charge SP — Minhas Reservas</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}"/>
+</head>
+<body>
+<div class="bg-grid"></div><div class="bg-glow"></div>
+<nav class="navbar">
+  <a href="/dashboard" class="navbar-brand">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+    EV Charge SP
+  </a>
+  <div class="navbar-links">
+    <a href="/dashboard">Nova Recarga</a>
+    <a href="/perfil">Meu Perfil</a>
+    <a href="/ia">IA Assistente</a>
+    <a href="/reservas" class="active">Minhas Reservas</a>
+    <button class="btn btn-ghost btn-sm" onclick="logout()">Sair</button>
+  </div>
+</nav>
+
+<main class="main">
+  <div class="container">
+    <header class="section-header" style="display:flex; justify-content:space-between; align-items:center;">
+      <div>
+        <h1 class="title-lg">Minhas Reservas</h1>
+        <p class="text-muted">Gerencie seus agendamentos ativos e cancelamentos.</p>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="simulateNoShowCheck()" style="border:1px dashed var(--danger); color:var(--danger);">
+        🛠️ Debug: Simular No-Show
+      </button>
+    </header>
+
+    <div class="card" style="margin-bottom: 2rem;">
+      <div class="card-header">
+        <h2 class="title-md">Reservas Ativas</h2>
+      </div>
+      <div id="reservationsList" class="reservations-container">
+        <!-- Lista de reservas será carregada aqui -->
+        <div class="loading-spinner">Carregando agendamentos...</div>
+      </div>
+    </div>
+
+    <div class="alert alert-info">
+      <strong>ℹ️ Política de Reserva:</strong> As reservas são gratuitas. No entanto, se você não comparecer e não cancelar com antecedência, uma taxa equivalente ao custo de uma recarga média será descontada do seu saldo.
+    </div>
+  </div>
+</main>
+
+<style>
+.reservations-container {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem 0;
+}
+.reservation-card {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: all 0.3s ease;
+}
+.reservation-card:hover {
+  border-color: var(--primary);
+  background: rgba(255,255,255,0.05);
+}
+.res-info h3 {
+  margin: 0 0 0.5rem 0;
+  color: var(--primary);
+}
+.res-info p {
+  margin: 0.2rem 0;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+.res-actions {
+  display: flex;
+  gap: 1rem;
+}
+.empty-state {
+  text-align: center;
+  padding: 3rem;
+  color: var(--text-muted);
+}
+</style>
+
+<script src="{{ url_for('static', filename='js/reservas.js') }}"></script>
+</body>
+</html>

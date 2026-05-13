@@ -100,6 +100,10 @@ def recarga():
 def ia():
     return render_template('ia.html')
 
+@app.route('/reservas')
+def reservas_page():
+    return render_template('reservas.html')
+
 
 # ─── AUTH ────────────────────────────────────────────────────────────────────────
 @app.route('/api/register', methods=['POST'])
@@ -298,29 +302,119 @@ def create_reservation(uid):
     except (ValueError, TypeError):
         return jsonify({'error': 'Tempo inválido'}), 400
 
-    valor_reserva = round(tempo_min * 0.5, 2)
+    data_reserva = data.get('data_reserva')  # Novo campo
+
+    valor_reserva = 0.00  # Reserva agora é gratuita
 
     conn = get_db()
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute('SELECT credito FROM usuarios WHERE id = %s', (uid,))
-        user = cursor.fetchone()
-        if float(user['credito']) < valor_reserva:
-            return jsonify({'error': f'Crédito insuficiente. Necessário R$ {valor_reserva:.2f}'}), 400
-
-        cursor.execute('UPDATE usuarios SET credito = credito - %s WHERE id = %s', (valor_reserva, uid))
+        # A reserva agora não desconta saldo no ato, mas cria o registro
         cursor.execute(
-            'INSERT INTO reservas (usuario_id, regiao, local, vaga, tempo_min, valor, status) VALUES (%s,%s,%s,%s,%s,%s,%s)',
-            (uid, regiao, local, vaga, tempo_min, valor_reserva, 'ativa')
+            'INSERT INTO reservas (usuario_id, regiao, local, vaga, tempo_min, valor, status, data_reserva) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)',
+            (uid, regiao, local, vaga, tempo_min, valor_reserva, 'ativa', data_reserva)
         )
         reserva_id = cursor.lastrowid
         cursor.execute(
             'INSERT INTO transacoes (usuario_id, tipo, valor, descricao) VALUES (%s,%s,%s,%s)',
-            (uid, 'debito', valor_reserva, f'Reserva vaga {vaga} — {local}')
+            (uid, 'sistema', 0, f'Reserva agendada: {vaga} — {local}')
         )
         conn.commit()
-        return jsonify({'message': 'Reserva confirmada!', 'reserva_id': reserva_id,
-                        'valor': valor_reserva, 'tempo_min': tempo_min})
+        return jsonify({
+            'message': 'Reserva confirmada! Lembre-se: caso não compareça, uma taxa de não-comparecimento será aplicada.', 
+            'reserva_id': reserva_id,
+            'valor': valor_reserva, 
+            'tempo_min': tempo_min
+        })
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route('/api/reservations/active', methods=['GET'])
+@token_required
+def get_active_reservations(uid):
+    conn = get_db()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            'SELECT * FROM reservas WHERE usuario_id = %s AND status = "ativa" ORDER BY data_hora DESC', (uid,)
+        )
+        rows = cursor.fetchall()
+        for r in rows:
+            r['valor'] = float(r['valor'])
+            r['data_hora'] = r['data_hora'].strftime('%d/%m/%Y %H:%M')
+            if r['data_reserva']:
+                r['data_reserva'] = r['data_reserva'].strftime('%d/%m/%Y %H:%M')
+        return jsonify(rows)
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route('/api/reservations/cancel/<int:res_id>', methods=['DELETE'])
+@token_required
+def cancel_reservation(uid, res_id):
+    conn = get_db()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # Verificar se a reserva pertence ao usuário e está ativa
+        cursor.execute('SELECT * FROM reservas WHERE id = %s AND usuario_id = %s AND status = "ativa"', (res_id, uid))
+        reserva = cursor.fetchone()
+        
+        if not reserva:
+            return jsonify({'error': 'Reserva não encontrada ou já cancelada'}), 404
+
+        # Cancelar reserva
+        cursor.execute('UPDATE reservas SET status = "cancelada" WHERE id = %s', (res_id,))
+        cursor.execute(
+            'INSERT INTO transacoes (usuario_id, tipo, valor, descricao) VALUES (%s,%s,%s,%s)',
+            (uid, 'sistema', 0, f'Cancelamento de reserva: {reserva["vaga"]} — {reserva["local"]}')
+        )
+        conn.commit()
+        return jsonify({'message': 'Reserva cancelada com sucesso!'})
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.route('/api/reservations/check-noshow', methods=['POST'])
+@token_required
+def check_noshows(uid):
+    conn = get_db()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # Busca reservas ativas cujo horário agendado já passou há mais de 15 minutos
+        # Usamos 15 minutos de tolerância
+        cursor.execute("""
+            SELECT id, usuario_id, vaga, local, valor 
+            FROM reservas 
+            WHERE status = 'ativa' 
+            AND data_reserva < DATE_SUB(NOW(), INTERVAL 15 MINUTE)
+        """)
+        overdue = cursor.fetchall()
+        
+        if not overdue:
+            return jsonify({'message': 'Nenhuma reserva vencida encontrada.'})
+
+        count = 0
+        penalty = 15.00
+        for res in overdue:
+            # 1. Marcar como no-show
+            cursor.execute('UPDATE reservas SET status = "no-show" WHERE id = %s', (res['id'],))
+            
+            # 2. Descontar do saldo do usuário
+            cursor.execute('UPDATE usuarios SET credito = credito - %s WHERE id = %s', (penalty, res['usuario_id']))
+            
+            # 3. Registrar transação
+            cursor.execute(
+                'INSERT INTO transacoes (usuario_id, tipo, valor, descricao) VALUES (%s,%s,%s,%s)',
+                (res['usuario_id'], 'debito', penalty, f'Taxa No-Show: {res["vaga"]} em {res["local"]}')
+            )
+            count += 1
+        
+        conn.commit()
+        return jsonify({'message': f'Verificação concluída. {count} multa(s) aplicada(s).'})
     finally:
         cursor.close()
         conn.close()
@@ -473,7 +567,9 @@ RESERVAS RECENTES:
 INFORMAÇÕES DO SISTEMA:
 - Locais de recarga disponíveis em: Zona Sul, Leste, Oeste e Norte de SP.
 - Preço fixo por kWh: R$ 1,80.
-- Custo de reserva de vaga: R$ 0,50 por minuto.
+- Reserva de vaga: Gratuita.
+- Política de Cancelamento: O cancelamento é gratuito se feito a qualquer momento antes do horário agendado. 
+- Taxa de No-Show: Caso o usuário não compareça e não cancele a reserva, uma taxa fixa de R$ 15,00 (multa por obstrução de vaga) será aplicada ao saldo.
 """
 
         response = client.chat.completions.create(

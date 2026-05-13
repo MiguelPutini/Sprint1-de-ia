@@ -17,6 +17,12 @@ if (!getToken()) window.location.href = '/';
 let state = { plano: null, potencia: null, regiao: null, local: null, localNome: null, vaga: null, tempo: 30, userCredito: 0, userPlano: null };
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  const today = new Date().toISOString().split('T')[0];
+  document.getElementById('inputData').value = today;
+  document.getElementById('inputHora').value = '12:00';
+});
+
 async function init() {
   try {
     const res = await fetch('/api/profile', { headers: authHeaders() });
@@ -151,10 +157,12 @@ function fillSummary() {
   const potReal = Math.min(state.potencia, potRede, potCarro, potCarregador);
   const energia = ((potReal * tempo) / 60).toFixed(2);
   const custo = (energia * 1.8).toFixed(2);
+  const dataAg = document.getElementById('inputData').value;
+  const horaAg = document.getElementById('inputHora').value;
   document.getElementById('confPlano').textContent = state.plano;
   document.getElementById('confLocal').textContent = `${state.localNome} — ${state.regiao}`;
   document.getElementById('confVaga').textContent = state.vaga;
-  document.getElementById('confTempo').textContent = `${tempo} min`;
+  document.getElementById('confTempo').textContent = `${tempo} min (${dataAg} às ${horaAg})`;
   document.getElementById('confEnergia').textContent = `${energia} kWh`;
   document.getElementById('confCusto').textContent = `R$ ${custo}`;
   document.getElementById('confSaldo').textContent = `R$ ${state.userCredito.toFixed(2)}`;
@@ -181,6 +189,42 @@ async function startCharging() {
     showAlert('dashAlert', 'error', '❌ ' + err.message);
     btn.disabled = false;
     btn.innerHTML = '🔌 Iniciar Recarga';
+  }
+}
+
+async function createReservation() {
+  const btn = document.getElementById('btnReserve');
+  const dataVal = document.getElementById('inputData').value;
+  const horaVal = document.getElementById('inputHora').value;
+
+  if (!dataVal || !horaVal) {
+    showAlert('dashAlert', 'error', '⚠️ Por favor, escolha a data e o horário.');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Agendando...';
+  try {
+    const res = await fetch('/api/reservations', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ 
+        regiao: state.regiao, 
+        local: state.localNome, 
+        vaga: state.vaga, 
+        tempo_min: state.tempo,
+        data_reserva: `${dataVal} ${horaVal}:00`
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Erro ao agendar reserva');
+    
+    alert(data.message);
+    window.location.href = '/reservas';
+  } catch (err) {
+    showAlert('dashAlert', 'error', '❌ ' + err.message);
+    btn.disabled = false;
+    btn.innerHTML = '📅 Agendar para depois';
   }
 }
 

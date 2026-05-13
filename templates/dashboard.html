@@ -23,6 +23,7 @@
     <a href="/dashboard" class="active">Nova Recarga</a>
     <a href="/perfil">Meu Perfil</a>
     <a href="/ia">IA Assistente</a>
+    <a href="/reservas">Minhas Reservas</a>
     <span id="navPlan" class="badge-plan hidden"></span>
     <button class="btn btn-ghost btn-sm" onclick="logout()">Sair</button>
   </div>
@@ -106,9 +107,17 @@
         </div>
 
         <div class="card">
-          <div class="card-title"><span>⏱️</span> Tempo de Recarga</div>
+          <div class="card-title"><span>⏱️</span> Agendamento</div>
           <div class="form-group">
-            <label for="inputTempo">Duração (minutos)</label>
+            <label for="inputData">Dia da Reserva</label>
+            <input type="date" id="inputData" />
+          </div>
+          <div class="form-group">
+            <label for="inputHora">Horário</label>
+            <input type="time" id="inputHora" />
+          </div>
+          <div class="form-group">
+            <label for="inputTempo">Duração prevista (minutos)</label>
             <input type="number" id="inputTempo" value="30" min="10" max="240" step="5"/>
           </div>
           <div id="tempoInfo" class="card card-sm" style="background:rgba(0,212,170,0.07);border:1px solid rgba(0,212,170,0.2);margin-top:1rem;">
@@ -187,10 +196,15 @@
           <div class="charging-orb" id="confOrb">⚡</div>
           <h3>Pronto para carregar?</h3>
           <p class="text-muted" style="font-size:0.88rem;">Ao iniciar, a vaga será reservada e o valor debitado do seu saldo.</p>
-          <button class="btn btn-primary btn-lg btn-full" id="btnStartCharging" onclick="startCharging()">
-            🔌 Iniciar Recarga
-          </button>
-          <button class="btn btn-outline btn-full" onclick="goToStep(3)">← Voltar</button>
+          <div style="display:flex; flex-direction:column; gap:0.8rem; width:100%;">
+            <button class="btn btn-primary btn-lg" id="btnStartCharging" onclick="startCharging()">
+              🔌 Iniciar Recarga Agora
+            </button>
+            <button class="btn btn-outline btn-lg" id="btnReserve" onclick="createReservation()">
+              📅 Agendar para depois
+            </button>
+            <button class="btn btn-ghost" onclick="goToStep(3)">← Voltar</button>
+          </div>
         </div>
       </div>
     </div>
